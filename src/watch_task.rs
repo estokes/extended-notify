@@ -15,7 +15,7 @@ use poolshark::{
 use std::{
     collections::{hash_set, VecDeque},
     ffi::OsString,
-    path::{Path, PathBuf},
+    path::Path,
     result::Result,
     sync::{Arc, LazyLock},
     time::Duration,
@@ -59,12 +59,18 @@ impl PathStatus {
                 }
                 Err(_) => match (root.parent(), root.file_name()) {
                     (None, None) => {
-                        let path = ArcPath::from(PathBuf::from(path));
-                        break Self { exists: path.clone(), missing, full_path: path };
+                        break Self {
+                            exists: ArcPath::root(),
+                            missing,
+                            full_path: ArcPath::from(path),
+                        };
                     }
                     (None, Some(_)) => {
-                        let root = ArcPath::from(PathBuf::from(root));
-                        break Self { exists: root.clone(), missing, full_path: root };
+                        break Self {
+                            exists: ArcPath::root(),
+                            missing,
+                            full_path: ArcPath::from(path),
+                        };
                     }
                     (Some(parent), None) => root = parent,
                     (Some(parent), Some(file)) => {
@@ -75,7 +81,7 @@ impl PathStatus {
             }
         };
         if !t.missing.is_empty() {
-            let full_path = ArcPath::make_mut(&mut t.full_path);
+            let full_path = t.full_path.make_mut();
             for part in t.missing.iter().rev() {
                 full_path.push(part);
             }
@@ -401,12 +407,12 @@ pub(super) async fn watcher_loop<T: EventHandler>(
                         Interest::Delete
                         | Interest::DeleteFile
                         | Interest::DeleteFolder
-                        | Interest::Other)
+                        | Interest::DeleteOther)
                 {
                     let path = path.clone();
                     push_event(&mut batch, $id, path, EventKind::Event(Interest::Delete))
                 }
-                or_push!(&path, $id, watcher.unwatch(&path));
+                or_push!(path, $id, watcher.unwatch(&path));
             }
             match stc.add {
                 None => (),

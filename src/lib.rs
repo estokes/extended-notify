@@ -1,3 +1,88 @@
+//! Extended filesystem watcher built on [notify].
+//!
+//! This crate extends notify with several features:
+//!
+//! - **Watch non-existent paths**: When you watch a path that doesn't exist,
+//!   the nearest existing ancestor is watched instead, and polling detects
+//!   when the target path comes into existence. This is useful for watching
+//!   config files that may be created later, or paths on removable media.
+//!
+//! - **Interest-based filtering**: Rather than receiving all events and
+//!   filtering yourself, specify exactly which event types matter to you.
+//!   Interests are hierarchical—subscribing to [`Interest::Delete`] receives
+//!   all deletion events, while [`Interest::DeleteFile`] only receives file
+//!   deletions.
+//!
+//! - **RAII watch handles**: The [`Watched`] handle returned by [`Watcher::add`]
+//!   automatically stops the watch when dropped. No manual cleanup required.
+//!
+//! - **Synthetic events**: When a non-existent path comes into existence (or
+//!   vice versa), synthetic [`Interest::Create`] and [`Interest::Delete`]
+//!   events are generated if you've subscribed to them.
+//!
+//! - **Establishment notification**: Subscribe to [`Interest::Established`] to
+//!   receive a synthetic event when the watch is first set up, useful for
+//!   triggering an initial read of the watched path.
+//!
+//! - **Multiple Watches**: Multiple watches for the same file or
+//!   directory are handled gracefully. Both watches will behave
+//!   correctly, but only one `Notify` watch will be created.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use extended_notify::{ArcPath, EventBatch, EventHandler, Interest, Watcher};
+//! use anyhow::Result;
+//! use enumflags2::make_bitflags;
+//!
+//! struct MyHandler;
+//!
+//! impl EventHandler for MyHandler {
+//!     async fn handle_event(&mut self, batch: EventBatch) -> Result<()> {
+//!         for (id, event) in batch.iter() {
+//!             println!("{:?}: {:?}", id, event);
+//!         }
+//!         Ok(())
+//!     }
+//! }
+//!
+//! # async fn example() -> Result<()> {
+//! let watcher = Watcher::new(MyHandler)?;
+//!
+//! // Watch a path that may or may not exist yet
+//! let interest = make_bitflags!(Interest::{Create | Delete | Modify});
+//! let handle = watcher.add(ArcPath::from("/tmp/my-config"), interest)?;
+//!
+//! // Events flow to MyHandler::handle_event
+//! // Watch stops when handle is dropped
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Event Delivery
+//!
+//! Events are delivered in batches through the [`EventHandler`] trait. Each
+//! batch contains `(Id, Event)` pairs, where the [`Id`] identifies which watch
+//! generated the event. Multiple events for the same watch may be coalesced
+//! into a single [`Event`] with multiple paths.
+//!
+//! If your handler returns an error, the watcher task stops and all subsequent
+//! operations on the [`Watcher`] will fail.
+//!
+//! # Polling
+//!
+//! Polling runs alongside native filesystem notifications to handle cases
+//! notifications can't cover—primarily detecting when non-existent paths come
+//! into existence. By default, 100 paths are checked each second. Adjust with
+//! [`Watcher::set_poll_interval`] and [`Watcher::set_poll_batch`], or disable
+//! polling entirely by setting the batch size to 0.
+//!
+//! If you disable polling creation of a file and multiple levels of
+//! directories may not be detected. For example if you watch a file
+//! /foo/bar/baz that does not exist, and you disable polling, if only
+//! /foo exists to start, and /foo/bar is created, then /foo/bar/baz
+//! is created, you may not get the create event for /foo/bar/baz.
+
 use anyhow::{bail, Result};
 use enumflags2::{bitflags, BitFlags};
 use fxhash::FxHashSet;
@@ -9,8 +94,8 @@ use std::{
     borrow::Borrow,
     hash::Hash,
     ops::Deref,
-    path::{Path, PathBuf},
-    sync::Arc,
+    path::{self, Path, PathBuf},
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 use tokio::{sync::mpsc, task};
@@ -35,12 +120,18 @@ impl Id {
 pub struct ArcPath(Arc<PathBuf>);
 
 impl ArcPath {
-    pub fn get_mut(t: &mut ArcPath) -> Option<&mut PathBuf> {
-        Arc::get_mut(&mut t.0)
+    pub fn get_mut(&mut self) -> Option<&mut PathBuf> {
+        Arc::get_mut(&mut self.0)
     }
 
-    pub fn make_mut(t: &mut ArcPath) -> &mut PathBuf {
-        Arc::make_mut(&mut t.0)
+    pub fn make_mut(&mut self) -> &mut PathBuf {
+        Arc::make_mut(&mut self.0)
+    }
+
+    pub fn root() -> Self {
+        static ROOT: LazyLock<ArcPath> =
+            LazyLock::new(|| ArcPath::from(path::MAIN_SEPARATOR_STR));
+        ROOT.clone()
     }
 }
 
@@ -61,6 +152,12 @@ impl Borrow<Path> for ArcPath {
 impl From<&Path> for ArcPath {
     fn from(value: &Path) -> Self {
         Self(Arc::new(value.into()))
+    }
+}
+
+impl From<&str> for ArcPath {
+    fn from(value: &str) -> Self {
+        Self(Arc::new(PathBuf::from(value)))
     }
 }
 
@@ -110,7 +207,13 @@ impl PartialOrd<PathBuf> for ArcPath {
 #[bitflags]
 #[repr(u64)]
 pub enum Interest {
+    /// Synthetic event fired when a watch is first established.
+    ///
+    /// This is not a filesystem event—it's generated immediately when the
+    /// watch is set up, regardless of whether the path exists. Useful for
+    /// triggering an initial read of watched files.
     Established,
+    /// Matches any event type.
     Any,
     Access,
     AccessOpen,
@@ -228,6 +331,9 @@ struct Watch {
 impl Watch {
     fn interested(&self, kind: &notify::EventKind) -> bool {
         use Interest::*;
+        if self.interest.contains(Any) {
+            return true;
+        }
         match kind {
             notify::EventKind::Any => !self.interest.is_empty(),
             notify::EventKind::Access(AccessKind::Any) => self
@@ -402,11 +508,30 @@ pub struct Event {
 
 type EventBatch = GPooled<Vec<(Id, Event)>>;
 
-pub trait EventHandler: Send + Sync + 'static {
+pub trait EventHandler: Send + 'static {
     fn handle_event(
         &mut self,
         event: EventBatch,
     ) -> impl Future<Output = Result<()>> + Send;
+}
+
+impl EventHandler for mpsc::Sender<EventBatch> {
+    fn handle_event(
+        &mut self,
+        event: EventBatch,
+    ) -> impl Future<Output = Result<()>> + Send {
+        async { Ok(self.send(event).await?) }
+    }
+}
+
+impl EventHandler for futures::channel::mpsc::Sender<EventBatch> {
+    fn handle_event(
+        &mut self,
+        event: EventBatch,
+    ) -> impl Future<Output = Result<()>> + Send {
+        use futures::SinkExt;
+        async { Ok(self.send(event).await?) }
+    }
 }
 
 /// A watched path
