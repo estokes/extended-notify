@@ -163,12 +163,14 @@ impl Watched {
         let mut syn = false;
         let add = match w {
             Some(w) => {
+                let did_exist = w.path_status.exists();
                 let old_exists = w.path_status.exists.clone();
                 let action = self.add_watch(w.watch).await;
                 // syn = true only when transitioning from file to parent (file deleted)
                 // i.e., old_exists is a descendant of new_exists
                 if let Some(new_w) = self.by_id.get(&id) {
-                    syn = old_exists.starts_with(&*new_w.path_status.exists)
+                    syn = did_exist
+                        && old_exists.starts_with(&*new_w.path_status.exists)
                         && old_exists != new_w.path_status.exists;
                 }
                 Some(action)
@@ -280,23 +282,19 @@ impl Watched {
     ) -> LPooled<Vec<Id>> {
         let mut by_id: LPooled<FxHashMap<Id, Event>> = LPooled::take();
         let mut status_changed: LPooled<Vec<Id>> = LPooled::take();
+        log::debug!("processing notify event {ev:?}");
         match ev {
             Ok(ev) => {
                 let event = EventKind::Event((&ev.kind).into());
                 for path in ev.paths {
                     let path = ArcPath::from(path);
                     for w in self.relevant_to(&*path) {
-                        macro_rules! report {
-                            () => {{
+                        if w.path_status.exists() {
+                            if w.watch.interested(&ev.kind) {
                                 let wev = by_id.entry(w.watch.id).or_insert_with(|| {
                                     Event { event: event.clone(), paths: PATHS.take() }
                                 });
                                 wev.paths.insert(path.clone());
-                            }};
-                        }
-                        if w.path_status.exists() {
-                            if w.watch.interested(&ev.kind) {
-                                report!();
                             }
                             match &ev.kind {
                                 notify::EventKind::Remove(_)
@@ -333,7 +331,10 @@ impl Watched {
             Err(e) => {
                 let mut paths: LPooled<Vec<_>> =
                     e.paths.iter().map(|b| ArcPath::from(b)).collect();
-                let is_not_found = matches!(&e.kind, notify::ErrorKind::PathNotFound);
+                let is_not_found = matches!(
+                    &e.kind,
+                    notify::ErrorKind::PathNotFound | notify::ErrorKind::WatchNotFound
+                );
                 let err = Arc::new(anyhow!(e));
                 for path in paths.drain(..) {
                     for w in self.relevant_to(&path) {
@@ -382,7 +383,12 @@ pub(super) async fn watcher_loop<T: EventHandler>(
     let mut poll_interval = tokio::time::interval(DEFAULT_POLL_INTERVAL);
     macro_rules! or_push {
         ($path:expr, $id:expr, $r:expr) => {
-            if let Err(e) = $r {
+            if let Err(e) = $r
+                && !matches!(
+                    e.kind,
+                    notify::ErrorKind::PathNotFound | notify::ErrorKind::WatchNotFound
+                )
+            {
                 push_error(&mut batch, $id, Some(ArcPath::from($path)), anyhow!(e))
             }
         };
@@ -398,10 +404,12 @@ pub(super) async fn watcher_loop<T: EventHandler>(
         };
     }
     macro_rules! status_change {
-        ($id:expr) => {{
+        ($id:expr, $syn_ok:expr) => {{
             let stc = watched.change_status($id).await;
+            log::debug!("status change for {:?} {stc:?}", $id);
             if let Some(path) = stc.remove {
-                if stc.syn
+                if $syn_ok
+                    && stc.syn
                     && let Some(w) = watched.by_id.get(&$id)
                     && w.watch.interest.intersects(
                         Interest::Delete
@@ -426,6 +434,7 @@ pub(super) async fn watcher_loop<T: EventHandler>(
                                 | Interest::CreateOther)
                         {
                             let path = path.clone();
+                            log::debug!("synthetic create for {:?} {}", $id, path.display());
                             push_event(&mut batch, $id, path, EventKind::Event(Interest::Create))
                         }
                     });
@@ -440,27 +449,31 @@ pub(super) async fn watcher_loop<T: EventHandler>(
         select! {
             _ = poll_interval.tick() => {
                 if watched.poll_batch() > 0 {
+                    log::trace!("starting poll cycle");
                     for id in watched.poll_cycle().await.drain(..) {
-                        status_change!(id)
+                        status_change!(id, true)
                     }
                 }
             },
             n = rx_notify.recv_many(&mut recv_buf, MAX_NOTIFY_BATCH) => {
                 if n == 0 {
+                    log::debug!("notify channel closed, exiting");
                     break
                 }
                 for ev in recv_buf.drain(..) {
                     let mut status = watched.process_event(&mut batch, ev).await;
                     for id in status.drain(..) {
-                        status_change!(id)
+                        status_change!(id, false)
                     }
                 }
             },
             n = rx.recv_many(&mut cmd_buf, MAX_CMD_BATCH) => {
                 if n == 0 {
+                    log::debug!("command channel closed, exiting");
                     break
                 }
                 for cmd in cmd_buf.drain(..) {
+                    log::debug!("processing watch command {cmd:?}");
                     match cmd {
                         Cmd::Watch(w) => {
                             let id = w.id;
@@ -514,6 +527,7 @@ pub(super) async fn watcher_loop<T: EventHandler>(
             },
         }
         if !batch.is_empty() {
+            log::debug!("sending event batch {batch:?}");
             if let Err(_) = tx.handle_event(batch).await {
                 break;
             }
@@ -533,4 +547,5 @@ pub(super) async fn watcher_loop<T: EventHandler>(
     if !batch.is_empty() {
         let _ = tx.handle_event(batch).await;
     }
+    log::debug!("watch task exiting");
 }

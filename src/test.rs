@@ -14,6 +14,7 @@ use tokio::{fs, sync::mpsc, time::timeout};
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
+#[allow(unused)]
 pub enum Expectation {
     /// Expect a single event (current "at least" semantics - extras OK)
     Event { watch: &'static str, kind: Interest, path: &'static str },
@@ -23,6 +24,7 @@ pub enum Expectation {
 
 /// A step in a test sequence
 #[derive(Debug, Clone)]
+#[allow(unused)]
 pub enum Step {
     /// Create a watch with a symbolic name
     Watch { name: &'static str, path: &'static str, interest: BitFlags<Interest> },
@@ -272,6 +274,7 @@ impl TestContext {
 }
 
 pub async fn run_test(steps: &[Step]) -> Result<()> {
+    let _ = env_logger::try_init();
     let mut ctx = TestContext::new().await?;
     for (i, step) in steps.iter().enumerate() {
         ctx.run_step(step)
@@ -442,15 +445,11 @@ async fn test_exactly_delete() -> Result<()> {
         // Delete the file - Linux sends DeleteFile
         DeleteFile { path: "test.txt" },
         // Expect DeleteFile plus the error from failed re-watch attempt
-        Exactly(&[
-            Expectation::Event {
-                watch: "w",
-                kind: Interest::DeleteFile,
-                path: "test.txt",
-            },
-            // CR estokes: should we squash this error? Since we are going to watch the parent anyway.
-            Expectation::Error { watch: "w" },
-        ]),
+        Exactly(&[Expectation::Event {
+            watch: "w",
+            kind: Interest::DeleteFile,
+            path: "test.txt",
+        }]),
     ])
     .await
 }
@@ -626,7 +625,7 @@ async fn test_delete_parent_directory() -> Result<()> {
         // Should get a delete event for the watched file
         Exactly(&[Expectation::Event {
             watch: "w",
-            kind: Interest::Delete,
+            kind: Interest::DeleteFile,
             path: "parent/child.txt",
         }]),
     ])
@@ -758,7 +757,7 @@ async fn test_replace_file_with_directory() -> Result<()> {
         DeleteFile { path: "thing" },
         Exactly(&[Expectation::Event {
             watch: "w",
-            kind: Interest::Delete,
+            kind: Interest::DeleteFile,
             path: "thing",
         }]),
         // Now create a directory with the same name

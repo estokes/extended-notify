@@ -15,4 +15,5 @@ poolshark = "0.2.6"
 tokio = { version = "1.48.0", features = ["fs", "macros", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
+env_logger = "0.11.8"
 tempfile = "3"
