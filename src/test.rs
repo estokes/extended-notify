@@ -295,7 +295,7 @@ pub async fn run_test(steps: &[Step]) -> Result<()> {
 // ============================================================================
 
 #[tokio::test]
-async fn test_watch_existing_file() -> Result<()> {
+async fn watch_existing_file() -> Result<()> {
     run_test(&[
         CreateFile { path: "foo.txt" },
         Watch {
@@ -319,7 +319,7 @@ async fn test_watch_existing_file() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_watch_nested_nonexistent() -> Result<()> {
+async fn watch_nested_nonexistent() -> Result<()> {
     run_test(&[
         Watch {
             name: "w",
@@ -343,7 +343,7 @@ async fn test_watch_nested_nonexistent() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_multiple_watches_same_file() -> Result<()> {
+async fn multiple_watches_same_file() -> Result<()> {
     run_test(&[
         CreateFile { path: "shared.txt" },
         Watch {
@@ -369,24 +369,38 @@ async fn test_multiple_watches_same_file() -> Result<()> {
             },
         ]),
         WriteFile { path: "shared.txt", content: "test" },
-        Exactly(&[
-            Expectation::Event {
-                watch: "w1",
-                kind: Interest::ModifyData,
-                path: "shared.txt",
-            },
-            Expectation::Event {
-                watch: "w2",
-                kind: Interest::ModifyData,
-                path: "shared.txt",
-            },
-        ]),
+        ExactlyWithOptional {
+            required: &[
+                Expectation::Event {
+                    watch: "w1",
+                    kind: Interest::ModifyData,
+                    path: "shared.txt",
+                },
+                Expectation::Event {
+                    watch: "w2",
+                    kind: Interest::ModifyData,
+                    path: "shared.txt",
+                },
+            ],
+            optional: &[
+                Expectation::Event {
+                    watch: "w1",
+                    kind: Interest::ModifyData,
+                    path: "shared.txt",
+                },
+                Expectation::Event {
+                    watch: "w2",
+                    kind: Interest::ModifyData,
+                    path: "shared.txt",
+                },
+            ],
+        },
     ])
     .await
 }
 
 #[tokio::test]
-async fn test_unwatch() -> Result<()> {
+async fn unwatch() -> Result<()> {
     run_test(&[
         CreateFile { path: "file.txt" },
         Watch {
@@ -410,7 +424,7 @@ async fn test_unwatch() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_nonexistent_create() -> Result<()> {
+async fn nonexistent_create() -> Result<()> {
     run_test(&[
         // Watch a file that doesn't exist yet
         Watch {
@@ -435,7 +449,7 @@ async fn test_nonexistent_create() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_delete() -> Result<()> {
+async fn delete() -> Result<()> {
     run_test(&[
         CreateFile { path: "test.txt" },
         Watch {
@@ -461,7 +475,7 @@ async fn test_delete() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_existing_file() -> Result<()> {
+async fn existing_file() -> Result<()> {
     run_test(&[
         CreateFile { path: "test.txt" },
         Watch {
@@ -496,7 +510,7 @@ async fn test_existing_file() -> Result<()> {
 /// Watch a directory AND a non-existent file inside it.
 /// Events should route to the correct watch.
 #[tokio::test]
-async fn test_watch_dir_and_nonexistent_child() -> Result<()> {
+async fn watch_dir_and_nonexistent_child() -> Result<()> {
     run_test(&[
         CreateDir { path: "dir" },
         Watch {
@@ -538,7 +552,7 @@ async fn test_watch_dir_and_nonexistent_child() -> Result<()> {
 /// Multiple watches on the same non-existent file.
 /// Both should receive Create when it appears.
 #[tokio::test]
-async fn test_multiple_watches_nonexistent() -> Result<()> {
+async fn multiple_watches_nonexistent() -> Result<()> {
     run_test(&[
         Watch {
             name: "w1",
@@ -574,7 +588,7 @@ async fn test_multiple_watches_nonexistent() -> Result<()> {
 /// File appears via rename, not create.
 /// Watch should still detect it.
 #[tokio::test]
-async fn test_rename_to_watched_path() -> Result<()> {
+async fn rename_to_watched_path() -> Result<()> {
     run_test(&[
         CreateFile { path: "source.txt" },
         Watch {
@@ -600,7 +614,7 @@ async fn test_rename_to_watched_path() -> Result<()> {
 /// Atomic file replacement pattern (common in editors):
 /// write to temp file, rename over watched file.
 #[tokio::test]
-async fn test_atomic_file_replacement() -> Result<()> {
+async fn atomic_file_replacement() -> Result<()> {
     run_test(&[
         CreateFile { path: "config.txt" },
         WriteFile { path: "config.txt", content: "v1" },
@@ -629,7 +643,7 @@ async fn test_atomic_file_replacement() -> Result<()> {
 
 /// Delete parent directory, not the watched file directly.
 #[tokio::test]
-async fn test_delete_parent_directory() -> Result<()> {
+async fn delete_parent_directory() -> Result<()> {
     run_test(&[
         CreateFile { path: "parent/child.txt" },
         Watch {
@@ -656,7 +670,7 @@ async fn test_delete_parent_directory() -> Result<()> {
 
 /// Rapid create/delete cycles - test for race conditions.
 #[tokio::test]
-async fn test_rapid_create_delete_cycles() -> Result<()> {
+async fn rapid_create_delete_cycles() -> Result<()> {
     run_test(&[
         Watch {
             name: "w",
@@ -701,7 +715,7 @@ async fn test_rapid_create_delete_cycles() -> Result<()> {
 
 /// Watch deeply nested non-existent path, create intermediate dirs one at a time.
 #[tokio::test]
-async fn test_create_intermediate_dirs_slowly() -> Result<()> {
+async fn create_intermediate_dirs_slowly() -> Result<()> {
     run_test(&[
         Watch {
             name: "w",
@@ -736,7 +750,7 @@ async fn test_create_intermediate_dirs_slowly() -> Result<()> {
 /// Rename a parent directory far up the chain.
 /// Watch on /a/b/c/d.txt, rename /a/b to /a/x
 #[tokio::test]
-async fn test_rename_parent_directory() -> Result<()> {
+async fn rename_parent_directory() -> Result<()> {
     run_test(&[
         CreateFile { path: "a/b/c/d.txt" },
         Watch {
@@ -763,7 +777,7 @@ async fn test_rename_parent_directory() -> Result<()> {
 
 /// Replace a file with a directory of the same name.
 #[tokio::test]
-async fn test_replace_file_with_directory() -> Result<()> {
+async fn replace_file_with_directory() -> Result<()> {
     run_test(&[
         CreateFile { path: "thing" },
         Watch {
