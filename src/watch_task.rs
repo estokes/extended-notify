@@ -431,7 +431,7 @@ pub(super) async fn watcher_loop<T: EventHandler>(
                                 Interest::Create
                                 | Interest::CreateFile
                                 | Interest::CreateFolder
-                                | Interest::CreateOther)
+                                    | Interest::CreateOther)
                         {
                             let path = path.clone();
                             log::debug!("synthetic create for {:?} {}", $id, path.display());

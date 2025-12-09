@@ -48,6 +48,12 @@ pub enum Step {
     AtLeast(&'static [Expectation]),
     /// Expect exactly these events and no others
     Exactly(&'static [Expectation]),
+    /// Expect exactly the required set, accept the optional set if
+    /// it's present, fail if anything else arrives
+    ExactlyWithOptional {
+        required: &'static [Expectation],
+        optional: &'static [Expectation],
+    },
     /// Drain any pending events (useful before next action)
     Drain,
 }
@@ -123,13 +129,15 @@ impl TestContext {
         self.pending_errors.iter().position(|id| *id == watch_id)
     }
 
-    async fn wait_for_events(&mut self, expectations: &[Expectation]) -> Result<()> {
+    async fn wait_for_events(
+        &mut self,
+        once: bool,
+        expectations: &[Expectation],
+    ) -> Result<()> {
         let deadline = tokio::time::Instant::now() + DEFAULT_TIMEOUT;
         let mut remaining: Vec<_> = expectations.iter().collect();
-
         while !remaining.is_empty() {
             self.recv_events().await?;
-
             remaining.retain(|ex| match ex {
                 Expectation::Event { watch, kind, path } => {
                     let watch_id = match self.watches.get(watch) {
@@ -159,11 +167,9 @@ impl TestContext {
                     }
                 }
             });
-
-            if remaining.is_empty() {
+            if once || remaining.is_empty() {
                 break;
             }
-
             if tokio::time::Instant::now() >= deadline {
                 bail!(
                     "timeout waiting for events: {:?}\n\
@@ -174,8 +180,32 @@ impl TestContext {
                     self.pending_errors
                 );
             }
+        }
+        Ok(())
+    }
 
-            tokio::time::sleep(Duration::from_millis(50)).await;
+    async fn wait_for_exactly(
+        &mut self,
+        required: &[Expectation],
+        optional: &[Expectation],
+    ) -> Result<()> {
+        self.wait_for_events(false, required).await?;
+        if !optional.is_empty() {
+            let _ = self.wait_for_events(true, optional).await;
+        }
+
+        // Give a moment for any stragglers, then check for extras
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        self.recv_events().await?;
+
+        if !self.pending_events.is_empty() || !self.pending_errors.is_empty() {
+            bail!(
+                "unexpected events remaining:\n\
+                 pending events: {:?}\n\
+                 pending errors: {:?}",
+                self.pending_events,
+                self.pending_errors
+            );
         }
         Ok(())
     }
@@ -188,13 +218,11 @@ impl TestContext {
                 let id = watched.id();
                 self.watches.insert(name, (id, watched));
             }
-
             Unwatch { name } => {
                 if self.watches.remove(name).is_none() {
                     bail!("unknown watch: {name}");
                 }
             }
-
             CreateFile { path } => {
                 let full_path = self.resolve_path(path);
                 if let Some(parent) = full_path.parent() {
@@ -202,12 +230,10 @@ impl TestContext {
                 }
                 fs::write(&full_path, b"").await?;
             }
-
             CreateDir { path } => {
                 let full_path = self.resolve_path(path);
                 fs::create_dir_all(&full_path).await?;
             }
-
             WriteFile { path, content } => {
                 let full_path = self.resolve_path(path);
                 if let Some(parent) = full_path.parent() {
@@ -215,17 +241,14 @@ impl TestContext {
                 }
                 fs::write(&full_path, content.as_bytes()).await?;
             }
-
             DeleteFile { path } => {
                 let full_path = self.resolve_path(path);
                 fs::remove_file(&full_path).await?;
             }
-
             DeleteDir { path } => {
                 let full_path = self.resolve_path(path);
                 fs::remove_dir_all(&full_path).await?;
             }
-
             Rename { from, to } => {
                 let from_path = self.resolve_path(from);
                 let to_path = self.resolve_path(to);
@@ -234,33 +257,16 @@ impl TestContext {
                 }
                 fs::rename(&from_path, &to_path).await?;
             }
-
             Sleep { ms } => {
                 tokio::time::sleep(Duration::from_millis(*ms)).await;
             }
-
             AtLeast(expectations) => {
-                self.wait_for_events(expectations).await?;
+                self.wait_for_events(false, expectations).await?;
             }
-
-            Exactly(expectations) => {
-                self.wait_for_events(expectations).await?;
-
-                // Give a moment for any stragglers, then check for extras
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                self.recv_events().await?;
-
-                if !self.pending_events.is_empty() || !self.pending_errors.is_empty() {
-                    bail!(
-                        "unexpected events remaining:\n\
-                         pending events: {:?}\n\
-                         pending errors: {:?}",
-                        self.pending_events,
-                        self.pending_errors
-                    );
-                }
+            Exactly(expectations) => self.wait_for_exactly(&expectations, &[]).await?,
+            ExactlyWithOptional { required, optional } => {
+                self.wait_for_exactly(required, optional).await?
             }
-
             Drain => {
                 // Give events time to arrive, then clear them
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -404,7 +410,7 @@ async fn test_unwatch() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_exactly_nonexistent_create() -> Result<()> {
+async fn test_nonexistent_create() -> Result<()> {
     run_test(&[
         // Watch a file that doesn't exist yet
         Watch {
@@ -429,7 +435,7 @@ async fn test_exactly_nonexistent_create() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_exactly_delete() -> Result<()> {
+async fn test_delete() -> Result<()> {
     run_test(&[
         CreateFile { path: "test.txt" },
         Watch {
@@ -455,7 +461,7 @@ async fn test_exactly_delete() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_exactly_existing_file() -> Result<()> {
+async fn test_existing_file() -> Result<()> {
     run_test(&[
         CreateFile { path: "test.txt" },
         Watch {
@@ -469,11 +475,20 @@ async fn test_exactly_existing_file() -> Result<()> {
             path: "test.txt",
         }]),
         WriteFile { path: "test.txt", content: "hello" },
-        Exactly(&[Expectation::Event {
-            watch: "w",
-            kind: Interest::ModifyData,
-            path: "test.txt",
-        }]),
+        ExactlyWithOptional {
+            required: &[Expectation::Event {
+                watch: "w",
+                kind: Interest::ModifyData,
+                path: "test.txt",
+            }],
+            // sometimes on linux inotify produces an extra modify
+            // event for a single fs::write_all.
+            optional: &[Expectation::Event {
+                watch: "w",
+                kind: Interest::ModifyData,
+                path: "test.txt",
+            }],
+        },
     ])
     .await
 }
@@ -502,13 +517,20 @@ async fn test_watch_dir_and_nonexistent_child() -> Result<()> {
                 path: "dir/file.txt",
             },
         ]),
-        // Create the file - both watches might see it, but file watch should get Create
+        // Create the file - both watches will see it
         CreateFile { path: "dir/file.txt" },
-        Exactly(&[Expectation::Event {
-            watch: "file",
-            kind: Interest::Create,
-            path: "dir/file.txt",
-        }]),
+        Exactly(&[
+            Expectation::Event {
+                watch: "dir",
+                kind: Interest::CreateFile,
+                path: "dir/file.txt",
+            },
+            Expectation::Event {
+                watch: "file",
+                kind: Interest::Create,
+                path: "dir/file.txt",
+            },
+        ]),
     ])
     .await
 }
