@@ -621,7 +621,7 @@ async fn atomic_file_replacement() -> Result<()> {
         Watch {
             name: "w",
             path: "config.txt",
-            interest: Interest::Established | Interest::Modify | Interest::Delete,
+            interest: Interest::Established | Interest::Delete,
         },
         Exactly(&[Expectation::Event {
             watch: "w",
@@ -684,31 +684,29 @@ async fn rapid_create_delete_cycles() -> Result<()> {
         }]),
         // Rapid cycles
         CreateFile { path: "ephemeral.txt" },
+        Exactly(&[Expectation::Event {
+            watch: "w",
+            kind: Interest::Create,
+            path: "ephemeral.txt",
+        }]),
         DeleteFile { path: "ephemeral.txt" },
+        Exactly(&[Expectation::Event {
+            watch: "w",
+            kind: Interest::DeleteFile,
+            path: "ephemeral.txt",
+        }]),
         CreateFile { path: "ephemeral.txt" },
+        Exactly(&[Expectation::Event {
+            watch: "w",
+            kind: Interest::Create,
+            path: "ephemeral.txt",
+        }]),
         DeleteFile { path: "ephemeral.txt" },
-        Exactly(&[
-            Expectation::Event {
-                watch: "w",
-                kind: Interest::Create,
-                path: "ephemeral.txt",
-            },
-            Expectation::Event {
-                watch: "w",
-                kind: Interest::Create,
-                path: "ephemeral.txt",
-            },
-            Expectation::Event {
-                watch: "w",
-                kind: Interest::Delete,
-                path: "ephemeral.txt",
-            },
-            Expectation::Event {
-                watch: "w",
-                kind: Interest::Delete,
-                path: "ephemeral.txt",
-            },
-        ]),
+        Exactly(&[Expectation::Event {
+            watch: "w",
+            kind: Interest::DeleteFile,
+            path: "ephemeral.txt",
+        }]),
     ])
     .await
 }
