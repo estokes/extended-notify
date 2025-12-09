@@ -103,6 +103,9 @@ use watch_task::MAX_NOTIFY_BATCH;
 
 mod watch_task;
 
+#[cfg(test)]
+mod test;
+
 pub const MIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -203,7 +206,7 @@ impl PartialOrd<PathBuf> for ArcPath {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[bitflags]
 #[repr(u64)]
 pub enum Interest {
@@ -506,7 +509,8 @@ pub struct Event {
     pub event: EventKind,
 }
 
-type EventBatch = GPooled<Vec<(Id, Event)>>;
+/// A batch of events delivered to the [`EventHandler`].
+pub type EventBatch = GPooled<Vec<(Id, Event)>>;
 
 pub trait EventHandler: Send + 'static {
     fn handle_event(

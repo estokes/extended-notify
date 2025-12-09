@@ -163,8 +163,15 @@ impl Watched {
         let mut syn = false;
         let add = match w {
             Some(w) => {
-                syn = &Some(w.path_status.exists) == &remove;
-                Some(self.add_watch(w.watch).await)
+                let old_exists = w.path_status.exists.clone();
+                let action = self.add_watch(w.watch).await;
+                // syn = true only when transitioning from file to parent (file deleted)
+                // i.e., old_exists is a descendant of new_exists
+                if let Some(new_w) = self.by_id.get(&id) {
+                    syn = old_exists.starts_with(&*new_w.path_status.exists)
+                        && old_exists != new_w.path_status.exists;
+                }
+                Some(action)
             }
             None => None,
         };
@@ -311,13 +318,6 @@ impl Watched {
                                 | notify::EventKind::Modify(ModifyKind::Name(
                                     RenameMode::To,
                                 )) => {
-                                    if w.watch.interested(&ev.kind)
-                                        && tokio::fs::try_exists(&*w.watch.path)
-                                            .await
-                                            .unwrap_or(false)
-                                    {
-                                        report!()
-                                    }
                                     status_changed.push(w.watch.id);
                                 }
                                 notify::EventKind::Any
