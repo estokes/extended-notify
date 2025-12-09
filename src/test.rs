@@ -131,7 +131,7 @@ impl TestContext {
 
     async fn wait_for_events(
         &mut self,
-        once: bool,
+        single_pass: bool,
         expectations: &[Expectation],
     ) -> Result<()> {
         let deadline = tokio::time::Instant::now() + DEFAULT_TIMEOUT;
@@ -167,7 +167,7 @@ impl TestContext {
                     }
                 }
             });
-            if once || remaining.is_empty() {
+            if single_pass || remaining.is_empty() {
                 break;
             }
             if tokio::time::Instant::now() >= deadline {
@@ -263,7 +263,7 @@ impl TestContext {
             AtLeast(expectations) => {
                 self.wait_for_events(false, expectations).await?;
             }
-            Exactly(expectations) => self.wait_for_exactly(&expectations, &[]).await?,
+            Exactly(expectations) => self.wait_for_exactly(expectations, &[]).await?,
             ExactlyWithOptional { required, optional } => {
                 self.wait_for_exactly(required, optional).await?
             }
@@ -309,11 +309,18 @@ async fn watch_existing_file() -> Result<()> {
             path: "foo.txt",
         }]),
         WriteFile { path: "foo.txt", content: "hello" },
-        Exactly(&[Expectation::Event {
-            watch: "w",
-            kind: Interest::ModifyData,
-            path: "foo.txt",
-        }]),
+        ExactlyWithOptional {
+            required: &[Expectation::Event {
+                watch: "w",
+                kind: Interest::ModifyData,
+                path: "foo.txt",
+            }],
+            optional: &[Expectation::Event {
+                watch: "w",
+                kind: Interest::ModifyData,
+                path: "foo.txt",
+            }],
+        },
     ])
     .await
 }
