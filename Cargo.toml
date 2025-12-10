@@ -2,6 +2,14 @@
 name = "extended-notify"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+authors = ["Eric Stokes <eestokes@pm.me>"]
+homepage = "https://github.com/estokes/extended-notify"
+repository = "https://github.com/estokes/extended-notify"
+description = "extended cross-platform filesystem notifications"
+documentation = "https://docs.rs/extended-notify"
+keywords = ["events", "filesystem", "notify", "watch"]
+categories = ["filesystem"]
 
 [dependencies]
 anyhow = "1.0.100"
