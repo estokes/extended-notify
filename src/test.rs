@@ -19,7 +19,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 #[allow(unused)]
 pub enum Expectation {
     /// Expect a single event (current "at least" semantics - extras OK)
-    Event { watch: &'static str, kind: Interest, path: &'static str },
+    Event { watch: &'static str, kind: BitFlags<Interest>, path: &'static str },
     /// Expect an error event on a watch
     Error { watch: &'static str },
 }
@@ -123,12 +123,12 @@ impl TestContext {
     fn find_event(
         &mut self,
         watch_id: Id,
-        kind: Interest,
+        kind: BitFlags<Interest>,
         path: &PathBuf,
     ) -> Option<usize> {
-        self.pending_events
-            .iter()
-            .position(|(id, k, p)| *id == watch_id && *k == kind && p.as_path() == path)
+        self.pending_events.iter().position(|(id, k, p)| {
+            *id == watch_id && kind.contains(*k) && p.as_path() == path
+        })
     }
 
     fn find_error(&mut self, watch_id: Id) -> Option<usize> {
@@ -217,6 +217,7 @@ impl TestContext {
     }
 
     async fn run_step(&mut self, step: &Step) -> Result<()> {
+        eprintln!("run step {step:?}");
         match step {
             Watch { name, path, interest } => {
                 let full_path = self.resolve_path(path);
@@ -300,16 +301,12 @@ pub async fn run_test(steps: &[Step]) -> Result<()> {
 // Tests
 // ============================================================================
 
-const fn expect_modify_file(watch: &'static str, path: &'static str) -> Expectation {
-    let kind =
-        if cfg!(target_os = "windows") { Interest::Modify } else { Interest::ModifyData };
-    Expectation::Event { watch, kind, path }
-}
-
-const fn expect_delete_file(watch: &'static str, path: &'static str) -> Expectation {
-    let kind =
-        if cfg!(target_os = "windows") { Interest::Delete } else { Interest::DeleteFile };
-    Expectation::Event { watch, kind, path }
+macro_rules! ex {
+    ($($e:expr),+$(,)?) => {
+        &*Box::leak(Box::new([
+            $($e),+
+        ]))
+    }
 }
 
 #[tokio::test]
@@ -320,16 +317,16 @@ async fn nested_nonexistent() -> Result<()> {
             path: "a/b/c.txt",
             interest: Interest::Established | Interest::Create,
         },
-        Exactly(&[Expectation::Event {
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Established,
+            kind: Interest::Established.into(),
             path: "a/b/c.txt",
         }]),
         // Create parent dirs and file
         CreateFile { path: "a/b/c.txt" },
-        Exactly(&[Expectation::Event {
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Create,
+            kind: Interest::Create.into(),
             path: "a/b/c.txt",
         }]),
     ])
@@ -350,28 +347,44 @@ async fn multiple_watches_same_file() -> Result<()> {
             path: "shared.txt",
             interest: Interest::Established | Interest::Modify,
         },
-        Exactly(&[
+        Exactly(ex![
             Expectation::Event {
                 watch: "w1",
-                kind: Interest::Established,
+                kind: Interest::Established.into(),
                 path: "shared.txt",
             },
             Expectation::Event {
                 watch: "w2",
-                kind: Interest::Established,
+                kind: Interest::Established.into(),
                 path: "shared.txt",
             },
         ]),
         WriteFile { path: "shared.txt", content: "test" },
         ExactlyWithOptional {
-            required: Box::leak(Box::new([
-                expect_modify_file("w1", "shared.txt"),
-                expect_modify_file("w2", "shared.txt"),
-            ])),
-            optional: Box::leak(Box::new([
-                expect_modify_file("w1", "shared.txt"),
-                expect_modify_file("w2", "shared.txt"),
-            ])),
+            required: ex![
+                Expectation::Event {
+                    watch: "w1",
+                    kind: Interest::Modify | Interest::ModifyData,
+                    path: "shared.txt"
+                },
+                Expectation::Event {
+                    watch: "w2",
+                    kind: Interest::Modify | Interest::ModifyData,
+                    path: "shared.txt"
+                }
+            ],
+            optional: ex![
+                Expectation::Event {
+                    watch: "w1",
+                    kind: Interest::Modify | Interest::ModifyData,
+                    path: "shared.txt"
+                },
+                Expectation::Event {
+                    watch: "w2",
+                    kind: Interest::Modify | Interest::ModifyData,
+                    path: "shared.txt"
+                }
+            ],
         },
     ])
     .await
@@ -386,9 +399,9 @@ async fn unwatch() -> Result<()> {
             path: "file.txt",
             interest: Interest::Established | Interest::Modify,
         },
-        Exactly(&[Expectation::Event {
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Established,
+            kind: Interest::Established.into(),
             path: "file.txt",
         }]),
         Unwatch { name: "w" },
@@ -410,16 +423,16 @@ async fn nonexistent_create() -> Result<()> {
             path: "test.txt",
             interest: Interest::Established | Interest::Create,
         },
-        Exactly(&[Expectation::Event {
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Established,
+            kind: Interest::Established.into(),
             path: "test.txt",
         }]),
         // Create the file - should get exactly one Create event
         CreateFile { path: "test.txt" },
-        Exactly(&[Expectation::Event {
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Create,
+            kind: Interest::Create.into(),
             path: "test.txt",
         }]),
     ])
@@ -427,7 +440,7 @@ async fn nonexistent_create() -> Result<()> {
 }
 
 #[tokio::test]
-async fn delete() -> Result<()> {
+async fn delete_file() -> Result<()> {
     run_test(&[
         CreateFile { path: "test.txt" },
         Watch {
@@ -435,15 +448,19 @@ async fn delete() -> Result<()> {
             path: "test.txt",
             interest: Interest::Established | Interest::Delete,
         },
-        Exactly(&[Expectation::Event {
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Established,
+            kind: Interest::Established.into(),
             path: "test.txt",
         }]),
         // Delete the file - Linux sends DeleteFile
         DeleteFile { path: "test.txt" },
         // Expect DeleteFile plus the error from failed re-watch attempt
-        Exactly(Box::leak(Box::new([expect_delete_file("w", "test.txt")]))),
+        Exactly(ex![Expectation::Event {
+            watch: "w",
+            kind: (Interest::Delete | Interest::DeleteFile).into(),
+            path: "test.txt",
+        }]),
     ])
     .await
 }
@@ -455,20 +472,64 @@ async fn existing_file() -> Result<()> {
         Watch {
             name: "w",
             path: "test.txt",
-            interest: Interest::Established | Interest::Modify,
+            interest: Interest::Established | Interest::Modify | Interest::Create,
         },
-        Exactly(&[Expectation::Event {
+        #[cfg(not(target_os = "macos"))]
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Established,
+            kind: Interest::Established.into(),
             path: "test.txt",
         }]),
-        WriteFile { path: "test.txt", content: "hello" },
+        #[cfg(target_os = "macos")]
         ExactlyWithOptional {
-            required: Box::leak(Box::new([expect_modify_file("w", "test.txt")])),
+            required: ex![Expectation::Event {
+                watch: "w",
+                kind: Interest::Established.into(),
+                path: "test.txt",
+            }],
+            // fsnotify will sometimes deliver the original create event
+            optional: ex![Expectation::Event {
+                watch: "w",
+                kind: Interest::CreateFile.into(),
+                path: "test.txt",
+            }],
+        },
+        WriteFile { path: "test.txt", content: "hello" },
+        #[cfg(target_os = "linux")]
+        ExactlyWithOptional {
+            required: ex![Expectation::Event {
+                watch: "w",
+                kind: (Interest::Modify | Interest::ModifyData).into(),
+                path: "test.txt",
+            }],
             // sometimes on linux inotify produces an extra modify
             // event for a single fs::write_all.
-            optional: Box::leak(Box::new([expect_modify_file("w", "test.txt")])),
+            optional: ex![Expectation::Event {
+                watch: "w",
+                kind: (Interest::Modify | Interest::ModifyData).into(),
+                path: "test.txt",
+            }],
         },
+        #[cfg(target_os = "macos")]
+        ExactlyWithOptional {
+            required: ex![Expectation::Event {
+                watch: "w",
+                kind: Interest::CreateFile.into(),
+                path: "test.txt",
+            }],
+            // fsnotify will sometimes deliver the original create event
+            optional: ex![Expectation::Event {
+                watch: "w",
+                kind: Interest::CreateFile.into(),
+                path: "test.txt",
+            }],
+        },
+        #[cfg(target_os = "windows")]
+        Exactly(ex![Expectation::Event {
+            watch: "w",
+            kind: (Interest::Modify | Interest::ModifyData).into(),
+            path: "test.txt",
+        }]),
     ])
     .await
 }
@@ -489,49 +550,53 @@ async fn dir_and_nonexistent_child() -> Result<()> {
             path: "dir/file.txt",
             interest: Interest::Established | Interest::Create,
         },
-        Exactly(&[
-            Expectation::Event { watch: "dir", kind: Interest::Established, path: "dir" },
+        Exactly(ex![
+            Expectation::Event {
+                watch: "dir",
+                kind: Interest::Established.into(),
+                path: "dir",
+            },
             Expectation::Event {
                 watch: "file",
-                kind: Interest::Established,
+                kind: Interest::Established.into(),
                 path: "dir/file.txt",
             },
         ]),
         // Create the file - both watches will see it
         CreateFile { path: "dir/file.txt" },
         #[cfg(unix)]
-        Exactly(&[
+        Exactly(ex![
             Expectation::Event {
                 watch: "dir",
-                kind: Interest::CreateFile,
+                kind: Interest::CreateFile.into(),
                 path: "dir/file.txt",
             },
             Expectation::Event {
                 watch: "file",
-                kind: Interest::Create,
+                kind: Interest::Create.into(),
                 path: "dir/file.txt",
             },
         ]),
         #[cfg(windows)]
-        Exactly(&[
+        Exactly(ex![
             Expectation::Event {
                 watch: "dir",
-                kind: Interest::Create,
+                kind: Interest::Create.into(),
                 path: "dir/file.txt",
             },
             Expectation::Event {
                 watch: "file",
-                kind: Interest::Create,
+                kind: Interest::Create.into(),
                 path: "dir/file.txt",
             },
             Expectation::Event {
                 watch: "dir",
-                kind: Interest::Create,
+                kind: Interest::Create.into(),
                 path: "dir/file.txt",
             },
             Expectation::Event {
                 watch: "file",
-                kind: Interest::Create,
+                kind: Interest::Create.into(),
                 path: "dir/file.txt",
             },
         ]),
@@ -554,31 +619,55 @@ async fn multiple_watches_nonexistent() -> Result<()> {
             path: "ghost.txt",
             interest: Interest::Established | Interest::Create,
         },
-        Exactly(&[
+        Exactly(ex![
             Expectation::Event {
                 watch: "w1",
-                kind: Interest::Established,
+                kind: Interest::Established.into(),
                 path: "ghost.txt",
             },
             Expectation::Event {
                 watch: "w2",
-                kind: Interest::Established,
+                kind: Interest::Established.into(),
                 path: "ghost.txt",
             },
         ]),
         CreateFile { path: "ghost.txt" },
         #[cfg(unix)]
-        Exactly(&[
-            Expectation::Event { watch: "w1", kind: Interest::Create, path: "ghost.txt" },
-            Expectation::Event { watch: "w2", kind: Interest::Create, path: "ghost.txt" },
+        Exactly(ex![
+            Expectation::Event {
+                watch: "w1",
+                kind: Interest::Create.into(),
+                path: "ghost.txt",
+            },
+            Expectation::Event {
+                watch: "w2",
+                kind: Interest::Create.into(),
+                path: "ghost.txt",
+            },
         ]),
         // for some reason windows sends duplicate creation events
         #[cfg(windows)]
-        Exactly(&[
-            Expectation::Event { watch: "w1", kind: Interest::Create, path: "ghost.txt" },
-            Expectation::Event { watch: "w2", kind: Interest::Create, path: "ghost.txt" },
-            Expectation::Event { watch: "w1", kind: Interest::Create, path: "ghost.txt" },
-            Expectation::Event { watch: "w2", kind: Interest::Create, path: "ghost.txt" },
+        Exactly(ex![
+            Expectation::Event {
+                watch: "w1",
+                kind: Interest::Create.into(),
+                path: "ghost.txt",
+            },
+            Expectation::Event {
+                watch: "w2",
+                kind: Interest::Create.into(),
+                path: "ghost.txt",
+            },
+            Expectation::Event {
+                watch: "w1",
+                kind: Interest::Create.into(),
+                path: "ghost.txt",
+            },
+            Expectation::Event {
+                watch: "w2",
+                kind: Interest::Create.into(),
+                path: "ghost.txt",
+            },
         ]),
     ])
     .await
@@ -595,15 +684,15 @@ async fn rename_to_watched_path() -> Result<()> {
             path: "target.txt",
             interest: Interest::Established | Interest::Create,
         },
-        Exactly(&[Expectation::Event {
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Established,
+            kind: Interest::Established.into(),
             path: "target.txt",
         }]),
         Rename { from: "source.txt", to: "target.txt" },
-        Exactly(&[Expectation::Event {
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Create,
+            kind: Interest::Create.into(),
             path: "target.txt",
         }]),
     ])
@@ -622,16 +711,20 @@ async fn atomic_file_replacement() -> Result<()> {
             path: "config.txt",
             interest: Interest::Established | Interest::Delete,
         },
-        Exactly(&[Expectation::Event {
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Established,
+            kind: Interest::Established.into(),
             path: "config.txt",
         }]),
         // Atomic replacement: write temp, rename over original
         WriteFile { path: "config.txt.tmp", content: "v2" },
         Rename { from: "config.txt.tmp", to: "config.txt" },
         // Linux sees the old file deleted (DeleteFile) when renamed over
-        Exactly(Box::leak(Box::new([expect_delete_file("w", "config.txt")]))),
+        Exactly(ex![Expectation::Event {
+            watch: "w",
+            kind: (Interest::Delete | Interest::DeleteFile).into(),
+            path: "config.txt",
+        }]),
     ])
     .await
 }
@@ -646,15 +739,19 @@ async fn delete_parent_directory() -> Result<()> {
             path: "parent/child.txt",
             interest: Interest::Established | Interest::Delete,
         },
-        Exactly(&[Expectation::Event {
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Established,
+            kind: Interest::Established.into(),
             path: "parent/child.txt",
         }]),
         // Delete the parent, which implicitly deletes the child
         DeleteDir { path: "parent" },
         // Should get a delete event for the watched file
-        Exactly(Box::leak(Box::new([expect_delete_file("w", "parent/child.txt")]))),
+        Exactly(ex![Expectation::Event {
+            watch: "w",
+            kind: (Interest::Delete | Interest::DeleteFile).into(),
+            path: "parent/child.txt",
+        }]),
     ])
     .await
 }
@@ -668,28 +765,36 @@ async fn rapid_create_delete_cycles() -> Result<()> {
             path: "ephemeral.txt",
             interest: Interest::Established | Interest::Create | Interest::Delete,
         },
-        Exactly(&[Expectation::Event {
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Established,
+            kind: Interest::Established.into(),
             path: "ephemeral.txt",
         }]),
         // Rapid cycles
         CreateFile { path: "ephemeral.txt" },
-        Exactly(&[Expectation::Event {
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Create,
+            kind: Interest::Create.into(),
             path: "ephemeral.txt",
         }]),
         DeleteFile { path: "ephemeral.txt" },
-        Exactly(Box::leak(Box::new([expect_delete_file("w", "ephemeral.txt")]))),
+        Exactly(ex![Expectation::Event {
+            watch: "w",
+            kind: (Interest::Delete | Interest::DeleteFile).into(),
+            path: "ephemeral.txt",
+        }]),
         CreateFile { path: "ephemeral.txt" },
-        Exactly(&[Expectation::Event {
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Create,
+            kind: Interest::Create.into(),
             path: "ephemeral.txt",
         }]),
         DeleteFile { path: "ephemeral.txt" },
-        Exactly(Box::leak(Box::new([expect_delete_file("w", "ephemeral.txt")]))),
+        Exactly(ex![Expectation::Event {
+            watch: "w",
+            kind: (Interest::Delete | Interest::DeleteFile).into(),
+            path: "ephemeral.txt",
+        }]),
     ])
     .await
 }
@@ -703,9 +808,9 @@ async fn create_intermediate_dirs_slowly() -> Result<()> {
             path: "a/b/c/d/e.txt",
             interest: Interest::Established | Interest::Create,
         },
-        Exactly(&[Expectation::Event {
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Established,
+            kind: Interest::Established.into(),
             path: "a/b/c/d/e.txt",
         }]),
         // Create directories one at a time
@@ -719,9 +824,9 @@ async fn create_intermediate_dirs_slowly() -> Result<()> {
         Sleep { ms: 100 },
         // Finally create the file
         CreateFile { path: "a/b/c/d/e.txt" },
-        Exactly(&[Expectation::Event {
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Create,
+            kind: Interest::Create.into(),
             path: "a/b/c/d/e.txt",
         }]),
     ])
@@ -740,17 +845,17 @@ async fn rename_parent_directory() -> Result<()> {
             path: "a/b/c/d.txt",
             interest: Interest::Established | Interest::Delete | Interest::Modify,
         },
-        Exactly(&[Expectation::Event {
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Established,
+            kind: Interest::Established.into(),
             path: "a/b/c/d.txt",
         }]),
         // Rename parent - the watched path no longer exists!
         Rename { from: "a/b", to: "a/x" },
         // Should see delete since the path is gone
-        Exactly(&[Expectation::Event {
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Delete,
+            kind: Interest::Delete.into(),
             path: "a/b/c/d.txt",
         }]),
     ])
@@ -767,20 +872,52 @@ async fn replace_file_with_directory() -> Result<()> {
             path: "thing",
             interest: Interest::Established | Interest::Delete | Interest::Create,
         },
-        Exactly(&[Expectation::Event {
+        #[cfg(not(target_os = "macos"))]
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Established,
+            kind: Interest::Established.into(),
             path: "thing",
         }]),
+        #[cfg(target_os = "macos")]
+        ExactlyWithOptional {
+            required: ex![Expectation::Event {
+                watch: "w",
+                kind: Interest::Established.into(),
+                path: "thing",
+            }],
+            optional: ex![Expectation::Event {
+                watch: "w",
+                kind: Interest::CreateFile.into(),
+                path: "thing",
+            }],
+        },
         DeleteFile { path: "thing" },
-        Exactly(Box::leak(Box::new([expect_delete_file("w", "thing")]))),
+        Exactly(ex![Expectation::Event {
+            watch: "w",
+            kind: (Interest::Delete | Interest::DeleteFile).into(),
+            path: "thing",
+        }]),
         // Now create a directory with the same name
         CreateDir { path: "thing" },
-        Exactly(&[Expectation::Event {
+        #[cfg(not(target_os = "macos"))]
+        Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: Interest::Create,
+            kind: Interest::Create.into(),
             path: "thing",
         }]),
+        #[cfg(target_os = "macos")]
+        ExactlyWithOptional {
+            required: ex![Expectation::Event {
+                watch: "w",
+                kind: Interest::CreateFolder.into(),
+                path: "thing",
+            }],
+            optional: ex![Expectation::Event {
+                watch: "w",
+                kind: Interest::Create.into(),
+                path: "thing",
+            }],
+        },
     ])
     .await
 }
