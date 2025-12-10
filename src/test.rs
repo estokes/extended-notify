@@ -865,13 +865,6 @@ async fn replace_file_with_directory() -> Result<()> {
             path: "thing",
             interest: Interest::Established | Interest::Delete | Interest::Create,
         },
-        #[cfg(not(target_os = "macos"))]
-        Exactly(ex![Expectation::Event {
-            watch: "w",
-            kind: Interest::Established.into(),
-            path: "thing",
-        }]),
-        #[cfg(target_os = "macos")]
         ExactlyWithOptional {
             required: ex![Expectation::Event {
                 watch: "w",
@@ -887,27 +880,20 @@ async fn replace_file_with_directory() -> Result<()> {
         DeleteFile { path: "thing" },
         Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: (Interest::Delete | Interest::DeleteFile).into(),
+            kind: Interest::Delete | Interest::DeleteFile,
             path: "thing",
         }]),
         // Now create a directory with the same name
         CreateDir { path: "thing" },
-        #[cfg(not(target_os = "macos"))]
-        Exactly(ex![Expectation::Event {
-            watch: "w",
-            kind: Interest::Create.into(),
-            path: "thing",
-        }]),
-        #[cfg(target_os = "macos")]
         ExactlyWithOptional {
             required: ex![Expectation::Event {
                 watch: "w",
-                kind: Interest::CreateFolder.into(),
+                kind: Interest::CreateFolder | Interest::Create,
                 path: "thing",
             }],
             optional: ex![Expectation::Event {
                 watch: "w",
-                kind: Interest::Create.into(),
+                kind: Interest::CreateFolder | Interest::Create,
                 path: "thing",
             }],
         },
