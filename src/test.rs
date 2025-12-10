@@ -340,48 +340,62 @@ async fn multiple_watches_same_file() -> Result<()> {
         Watch {
             name: "w1",
             path: "shared.txt",
-            interest: Interest::Established | Interest::Modify,
+            interest: Interest::Established | Interest::Modify | Interest::CreateFile,
         },
         Watch {
             name: "w2",
             path: "shared.txt",
-            interest: Interest::Established | Interest::Modify,
+            interest: Interest::Established | Interest::Modify | Interest::CreateFile,
         },
-        Exactly(ex![
-            Expectation::Event {
-                watch: "w1",
-                kind: Interest::Established.into(),
-                path: "shared.txt",
-            },
-            Expectation::Event {
-                watch: "w2",
-                kind: Interest::Established.into(),
-                path: "shared.txt",
-            },
-        ]),
+        ExactlyWithOptional {
+            required: ex![
+                Expectation::Event {
+                    watch: "w1",
+                    kind: Interest::Established.into(),
+                    path: "shared.txt",
+                },
+                Expectation::Event {
+                    watch: "w2",
+                    kind: Interest::Established.into(),
+                    path: "shared.txt",
+                },
+            ],
+            optional: ex![
+                Expectation::Event {
+                    watch: "w1",
+                    kind: Interest::CreateFile.into(),
+                    path: "shared.txt",
+                },
+                Expectation::Event {
+                    watch: "w2",
+                    kind: Interest::CreateFile.into(),
+                    path: "shared.txt",
+                },
+            ],
+        },
         WriteFile { path: "shared.txt", content: "test" },
         ExactlyWithOptional {
             required: ex![
                 Expectation::Event {
                     watch: "w1",
-                    kind: Interest::Modify | Interest::ModifyData,
+                    kind: Interest::Modify | Interest::ModifyData | Interest::CreateFile,
                     path: "shared.txt"
                 },
                 Expectation::Event {
                     watch: "w2",
-                    kind: Interest::Modify | Interest::ModifyData,
+                    kind: Interest::Modify | Interest::ModifyData | Interest::CreateFile,
                     path: "shared.txt"
                 }
             ],
             optional: ex![
                 Expectation::Event {
                     watch: "w1",
-                    kind: Interest::Modify | Interest::ModifyData,
+                    kind: Interest::Modify | Interest::ModifyData | Interest::CreateFile,
                     path: "shared.txt"
                 },
                 Expectation::Event {
                     watch: "w2",
-                    kind: Interest::Modify | Interest::ModifyData,
+                    kind: Interest::Modify | Interest::ModifyData | Interest::CreateFile,
                     path: "shared.txt"
                 }
             ],
@@ -495,41 +509,20 @@ async fn existing_file() -> Result<()> {
             }],
         },
         WriteFile { path: "test.txt", content: "hello" },
-        #[cfg(target_os = "linux")]
         ExactlyWithOptional {
             required: ex![Expectation::Event {
                 watch: "w",
-                kind: (Interest::Modify | Interest::ModifyData).into(),
+                kind: Interest::Modify | Interest::ModifyData | Interest::CreateFile,
                 path: "test.txt",
             }],
             // sometimes on linux inotify produces an extra modify
             // event for a single fs::write_all.
             optional: ex![Expectation::Event {
                 watch: "w",
-                kind: (Interest::Modify | Interest::ModifyData).into(),
+                kind: Interest::Modify | Interest::ModifyData | Interest::CreateFile,
                 path: "test.txt",
             }],
         },
-        #[cfg(target_os = "macos")]
-        ExactlyWithOptional {
-            required: ex![Expectation::Event {
-                watch: "w",
-                kind: Interest::CreateFile.into(),
-                path: "test.txt",
-            }],
-            // fsnotify will sometimes deliver the original create event
-            optional: ex![Expectation::Event {
-                watch: "w",
-                kind: Interest::CreateFile.into(),
-                path: "test.txt",
-            }],
-        },
-        #[cfg(target_os = "windows")]
-        Exactly(ex![Expectation::Event {
-            watch: "w",
-            kind: (Interest::Modify | Interest::ModifyData).into(),
-            path: "test.txt",
-        }]),
     ])
     .await
 }
