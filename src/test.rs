@@ -1,6 +1,8 @@
 #![cfg(test)]
 
-use crate::{ArcPath, EventBatch, EventKind, Id, Interest, Watcher};
+use crate::{
+    ArcPath, EventBatch, EventKind, Id, Interest, Watcher, WatcherConfigBuilder,
+};
 use anyhow::{bail, Result};
 use enumflags2::BitFlags;
 use fxhash::FxHashMap;
@@ -76,7 +78,8 @@ impl TestContext {
         let canonical_path = _temp_dir.path().canonicalize()?;
         eprintln!("running in {}", canonical_path.display());
         let (tx, rx) = mpsc::channel(100);
-        let watcher = Watcher::new(tx)?;
+        let watcher =
+            WatcherConfigBuilder::default().event_handler(tx).build()?.start()?;
         Ok(Self {
             _temp_dir,
             canonical_path,

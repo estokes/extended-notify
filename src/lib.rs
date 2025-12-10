@@ -84,11 +84,13 @@
 //! is created, you may not get the create event for /foo/bar/baz.
 
 use anyhow::{bail, Result};
+use derive_builder::Builder;
 use enumflags2::{bitflags, BitFlags};
 use fxhash::FxHashSet;
 use notify::event::{
     AccessKind, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind, RenameMode,
 };
+use notify_debouncer_full::{DebounceEventHandler, DebounceEventResult};
 use poolshark::global::GPooled;
 use std::{
     borrow::Borrow,
@@ -135,6 +137,12 @@ impl ArcPath {
         static ROOT: LazyLock<ArcPath> =
             LazyLock::new(|| ArcPath::from(path::MAIN_SEPARATOR_STR));
         ROOT.clone()
+    }
+}
+
+impl AsRef<Path> for ArcPath {
+    fn as_ref(&self) -> &Path {
+        &*self.0
     }
 }
 
@@ -489,10 +497,10 @@ enum Cmd {
     SetPollBatch(usize),
 }
 
-struct NotifyChan(mpsc::Sender<notify::Result<notify::Event>>);
+struct NotifyChan(mpsc::Sender<DebounceEventResult>);
 
-impl notify::EventHandler for NotifyChan {
-    fn handle_event(&mut self, event: notify::Result<notify::Event>) {
+impl DebounceEventHandler for NotifyChan {
+    fn handle_event(&mut self, event: notify_debouncer_full::DebounceEventResult) {
         let _ = self.0.blocking_send(event);
     }
 }
@@ -600,6 +608,59 @@ impl Drop for Watched {
     }
 }
 
+#[derive(Debug, Clone, Builder)]
+pub struct WatcherConfig<T: EventHandler> {
+    /// The debounce timeout, events will not arrive faster than this. Default 250ms.
+    #[builder(default = "Duration::from_millis(250)")]
+    timeout: Duration,
+    /// How often the debouncer ticks. Default 1/4 of the timeout
+    #[builder(setter(strip_option), default)]
+    tick_rate: Option<Duration>,
+    /// The poll interval determines how often to poll a batch of
+    /// files. Polling is necessary to cover cases that filesystem
+    /// notifications can't handle, such as watching a path that
+    /// doesn't yet exist. Each poll interval, poll batch files will
+    /// be checked in parallel.
+    ///
+    /// The minimum poll interval is 100ms, an error will be returned
+    /// if you try to set the value lower than that.
+    ///
+    /// default 1 second
+    #[builder(default = "Duration::from_secs(1)")]
+    poll_interval: Duration,
+
+    /// How many files to poll each poll interval. If this is set to 0
+    /// polling is disabled.
+    ///
+    /// default 100
+    #[builder(default = "100")]
+    poll_batch: usize,
+    /// Where to send the events (required)
+    event_handler: T,
+}
+
+impl<T: EventHandler> WatcherConfig<T> {
+    /// Start the watcher
+    pub fn start(self) -> Result<Watcher> {
+        let (notify_tx, notify_rx) = mpsc::channel(MAX_NOTIFY_BATCH);
+        let watcher = notify_debouncer_full::new_debouncer(
+            self.timeout,
+            self.tick_rate,
+            NotifyChan(notify_tx),
+        )?;
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        task::spawn(watch_task::watcher_loop(
+            self.poll_interval,
+            self.poll_batch,
+            watcher,
+            notify_rx,
+            cmd_rx,
+            self.event_handler,
+        ));
+        Ok(Watcher(cmd_tx))
+    }
+}
+
 /// An filesystem watcher
 ///
 /// When this object is dropped the background task associated with it
@@ -614,17 +675,6 @@ impl Drop for Watched {
 pub struct Watcher(mpsc::UnboundedSender<Cmd>);
 
 impl Watcher {
-    /// Start a new watcher
-    ///
-    /// Event batches will be sent to `tx`
-    pub fn new<T: EventHandler>(tx: T) -> Result<Self> {
-        let (notify_tx, notify_rx) = mpsc::channel(MAX_NOTIFY_BATCH);
-        let watcher = notify::recommended_watcher(NotifyChan(notify_tx))?;
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        task::spawn(watch_task::watcher_loop(watcher, notify_rx, cmd_rx, tx));
-        Ok(Self(cmd_tx))
-    }
-
     /// Add a new watch
     ///
     /// Fails if the watcher task has died. Other errors will be sent

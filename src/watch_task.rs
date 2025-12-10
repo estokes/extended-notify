@@ -6,14 +6,15 @@ use futures::future::join_all;
 use fxhash::{FxHashMap, FxHashSet};
 use notify::{
     event::{ModifyKind, RenameMode},
-    RecommendedWatcher, RecursiveMode, Watcher,
+    RecommendedWatcher, RecursiveMode,
 };
+use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache};
 use poolshark::{
     global::{GPooled, Pool},
     local::LPooled,
 };
 use std::{
-    collections::{hash_set, VecDeque},
+    collections::{hash_set, HashMap, VecDeque},
     ffi::OsString,
     path::Path,
     result::Result,
@@ -29,9 +30,7 @@ static BATCH_POOL: LazyLock<Pool<Vec<(Id, Event)>>> =
 
 pub(super) const MAX_NOTIFY_BATCH: usize = 10_000;
 pub(super) const MAX_CMD_BATCH: usize = 10_000;
-const POLL_BATCH: usize = 100;
 const POLL_TIMEOUT: Duration = Duration::from_millis(250);
-const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PathStatus {
@@ -109,15 +108,23 @@ struct ChangeOfStatus {
     syn: bool,
 }
 
-#[derive(Default)]
 struct Watched {
     by_id: FxHashMap<Id, WatchInt>,
     by_root: FxHashMap<ArcPath, FxHashSet<Id>>,
     to_poll: Vec<Id>,
-    poll_batch: Option<usize>,
+    poll_batch: usize,
 }
 
 impl Watched {
+    fn new(poll_batch: usize) -> Self {
+        Self {
+            by_id: HashMap::default(),
+            by_root: HashMap::default(),
+            to_poll: Vec::new(),
+            poll_batch,
+        }
+    }
+
     /// add a watch and return the necessary action to the notify::Watcher
     async fn add_watch(&mut self, w: Watch) -> AddAction {
         let id = w.id;
@@ -236,19 +243,14 @@ impl Watched {
         I { level: 0, ids, t: self }
     }
 
-    fn poll_batch(&self) -> usize {
-        self.poll_batch.unwrap_or(POLL_BATCH)
-    }
-
     /// poll all watches and return a list of ids who's status might have changed
     async fn poll_cycle(&mut self) -> LPooled<Vec<Id>> {
         if self.to_poll.is_empty() {
             self.to_poll.extend(self.by_id.keys().map(|id| *id));
         }
-        let poll_batch = self.poll_batch();
         let mut to_check: LPooled<Vec<&WatchInt>> = LPooled::take();
         let mut i = 0;
-        while i < poll_batch
+        while i < self.poll_batch
             && let Some(id) = self.to_poll.pop()
         {
             i += 1;
@@ -371,16 +373,18 @@ fn push_event(batch: &mut EventBatch, id: Id, path: ArcPath, event: EventKind) {
 }
 
 pub(super) async fn watcher_loop<T: EventHandler>(
-    mut watcher: RecommendedWatcher,
-    mut rx_notify: mpsc::Receiver<notify::Result<notify::Event>>,
+    poll_interval: Duration,
+    poll_batch: usize,
+    mut watcher: Debouncer<RecommendedWatcher, RecommendedCache>,
+    mut rx_notify: mpsc::Receiver<DebounceEventResult>,
     mut rx: mpsc::UnboundedReceiver<Cmd>,
     mut tx: T,
 ) {
-    let mut watched = Watched::default();
+    let mut watched = Watched::new(poll_batch);
     let mut recv_buf = vec![];
     let mut cmd_buf = vec![];
     let mut batch = BATCH_POOL.take();
-    let mut poll_interval = tokio::time::interval(DEFAULT_POLL_INTERVAL);
+    let mut poll_interval = tokio::time::interval(poll_interval);
     macro_rules! or_push {
         ($path:expr, $id:expr, $r:expr) => {
             if let Err(e) = $r
@@ -448,7 +452,7 @@ pub(super) async fn watcher_loop<T: EventHandler>(
     loop {
         select! {
             _ = poll_interval.tick() => {
-                if watched.poll_batch() > 0 {
+                if watched.poll_batch > 0 {
                     log::trace!("starting poll cycle");
                     for id in watched.poll_cycle().await.drain(..) {
                         status_change!(id, true)
@@ -461,9 +465,15 @@ pub(super) async fn watcher_loop<T: EventHandler>(
                     break
                 }
                 for ev in recv_buf.drain(..) {
-                    let mut status = watched.process_event(&mut batch, ev).await;
-                    for id in status.drain(..) {
-                        status_change!(id, false)
+                    let mut events: LPooled<Vec<notify::Result<notify::Event>>> = match ev {
+                        Ok(dbev) => dbev.into_iter().map(|e| Ok(e.event)).collect(),
+                        Err(dber) => dber.into_iter().map(|e| Err(e)).collect()
+                    };
+                    for ev in events.drain(..) {
+                        let mut status = watched.process_event(&mut batch, ev).await;
+                        for id in status.drain(..) {
+                            status_change!(id, false)
+                        }
                     }
                 }
             },
@@ -520,7 +530,7 @@ pub(super) async fn watcher_loop<T: EventHandler>(
                             poll_interval = tokio::time::interval(d);
                         }
                         Cmd::SetPollBatch(n) => {
-                            watched.poll_batch = Some(n)
+                            watched.poll_batch = n
                         }
                     }
                 }
