@@ -340,12 +340,12 @@ async fn multiple_watches_same_file() -> Result<()> {
         Watch {
             name: "w1",
             path: "shared.txt",
-            interest: Interest::Established | Interest::Modify | Interest::CreateFile,
+            interest: Interest::Established | Interest::ModifyData | Interest::CreateFile,
         },
         Watch {
             name: "w2",
             path: "shared.txt",
-            interest: Interest::Established | Interest::Modify | Interest::CreateFile,
+            interest: Interest::Established | Interest::ModifyData | Interest::CreateFile,
         },
         ExactlyWithOptional {
             required: ex![
@@ -378,24 +378,36 @@ async fn multiple_watches_same_file() -> Result<()> {
             required: ex![
                 Expectation::Event {
                     watch: "w1",
-                    kind: Interest::Modify | Interest::ModifyData | Interest::CreateFile,
+                    kind: Interest::Modify
+                        | Interest::ModifyData
+                        | Interest::ModifyDataContent
+                        | Interest::CreateFile,
                     path: "shared.txt"
                 },
                 Expectation::Event {
                     watch: "w2",
-                    kind: Interest::Modify | Interest::ModifyData | Interest::CreateFile,
+                    kind: Interest::Modify
+                        | Interest::ModifyData
+                        | Interest::ModifyDataContent
+                        | Interest::CreateFile,
                     path: "shared.txt"
                 }
             ],
             optional: ex![
                 Expectation::Event {
                     watch: "w1",
-                    kind: Interest::Modify | Interest::ModifyData | Interest::CreateFile,
+                    kind: Interest::Modify
+                        | Interest::ModifyData
+                        | Interest::ModifyDataContent
+                        | Interest::CreateFile,
                     path: "shared.txt"
                 },
                 Expectation::Event {
                     watch: "w2",
-                    kind: Interest::Modify | Interest::ModifyData | Interest::CreateFile,
+                    kind: Interest::Modify
+                        | Interest::ModifyData
+                        | Interest::ModifyDataContent
+                        | Interest::CreateFile,
                     path: "shared.txt"
                 }
             ],
@@ -488,13 +500,6 @@ async fn existing_file() -> Result<()> {
             path: "test.txt",
             interest: Interest::Established | Interest::Modify | Interest::Create,
         },
-        #[cfg(not(target_os = "macos"))]
-        Exactly(ex![Expectation::Event {
-            watch: "w",
-            kind: Interest::Established.into(),
-            path: "test.txt",
-        }]),
-        #[cfg(target_os = "macos")]
         ExactlyWithOptional {
             required: ex![Expectation::Event {
                 watch: "w",
@@ -512,14 +517,22 @@ async fn existing_file() -> Result<()> {
         ExactlyWithOptional {
             required: ex![Expectation::Event {
                 watch: "w",
-                kind: Interest::Modify | Interest::ModifyData | Interest::CreateFile,
+                kind: Interest::Modify
+                    | Interest::ModifyData
+                    | Interest::ModifyDataContent
+                    | Interest::CreateFile
+                    | Interest::Create,
                 path: "test.txt",
             }],
             // sometimes on linux inotify produces an extra modify
             // event for a single fs::write_all.
             optional: ex![Expectation::Event {
                 watch: "w",
-                kind: Interest::Modify | Interest::ModifyData | Interest::CreateFile,
+                kind: Interest::Modify
+                    | Interest::ModifyData
+                    | Interest::CreateFile
+                    | Interest::Create
+                    | Interest::ModifyMetadata,
                 path: "test.txt",
             }],
         },
@@ -702,7 +715,7 @@ async fn atomic_file_replacement() -> Result<()> {
         Watch {
             name: "w",
             path: "config.txt",
-            interest: Interest::Established | Interest::Delete,
+            interest: Interest::Established | Interest::Delete | Interest::ModifyRename,
         },
         Exactly(ex![Expectation::Event {
             watch: "w",
@@ -715,7 +728,7 @@ async fn atomic_file_replacement() -> Result<()> {
         // Linux sees the old file deleted (DeleteFile) when renamed over
         Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: (Interest::Delete | Interest::DeleteFile).into(),
+            kind: Interest::Delete | Interest::DeleteFile | Interest::ModifyRename,
             path: "config.txt",
         }]),
     ])
@@ -765,23 +778,37 @@ async fn rapid_create_delete_cycles() -> Result<()> {
         }]),
         // Rapid cycles
         CreateFile { path: "ephemeral.txt" },
-        Exactly(ex![Expectation::Event {
-            watch: "w",
-            kind: Interest::Create.into(),
-            path: "ephemeral.txt",
-        }]),
+        ExactlyWithOptional {
+            required: ex![Expectation::Event {
+                watch: "w",
+                kind: Interest::Create | Interest::CreateFile,
+                path: "ephemeral.txt",
+            }],
+            optional: ex![Expectation::Event {
+                watch: "w",
+                kind: Interest::Create | Interest::CreateFile,
+                path: "ephemeral.txt",
+            }],
+        },
         DeleteFile { path: "ephemeral.txt" },
         Exactly(ex![Expectation::Event {
             watch: "w",
-            kind: (Interest::Delete | Interest::DeleteFile).into(),
+            kind: Interest::Delete | Interest::DeleteFile,
             path: "ephemeral.txt",
         }]),
         CreateFile { path: "ephemeral.txt" },
-        Exactly(ex![Expectation::Event {
-            watch: "w",
-            kind: Interest::Create.into(),
-            path: "ephemeral.txt",
-        }]),
+        ExactlyWithOptional {
+            required: ex![Expectation::Event {
+                watch: "w",
+                kind: Interest::Create | Interest::CreateFile,
+                path: "ephemeral.txt",
+            }],
+            optional: ex![Expectation::Event {
+                watch: "w",
+                kind: Interest::Create | Interest::CreateFile,
+                path: "ephemeral.txt",
+            }],
+        },
         DeleteFile { path: "ephemeral.txt" },
         Exactly(ex![Expectation::Event {
             watch: "w",

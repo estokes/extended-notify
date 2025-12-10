@@ -31,10 +31,11 @@
 //! # Example
 //!
 //! ```no_run
-//! use extended_notify::{ArcPath, EventBatch, EventHandler, Interest, Watcher};
+//! use extended_notify::{ArcPath, EventBatch, EventHandler, Interest, WatcherConfigBuilder};
 //! use anyhow::Result;
 //! use enumflags2::make_bitflags;
 //!
+//! #[derive(Clone)]
 //! struct MyHandler;
 //!
 //! impl EventHandler for MyHandler {
@@ -47,7 +48,10 @@
 //! }
 //!
 //! # async fn example() -> Result<()> {
-//! let watcher = Watcher::new(MyHandler)?;
+//! let watcher = WatcherConfigBuilder::default()
+//!     .event_handler(MyHandler)
+//!     .build()?
+//!     .start()?;
 //!
 //! // Watch a path that may or may not exist yet
 //! let interest = make_bitflags!(Interest::{Create | Delete | Modify});
