@@ -30,7 +30,10 @@ impl EventHandler for MyHandler {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let watcher = Watcher::new(MyHandler)?;
+    let watcher = WatcherConfigBuilder::default()
+        .event_handler(MyHandler)
+        .build()?
+        .start()?;
 
     // Watch a path that may or may not exist
     let interest = make_bitflags!(Interest::{Create | Delete | Modify});
